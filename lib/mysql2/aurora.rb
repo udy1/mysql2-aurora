@@ -11,57 +11,32 @@ module Mysql2
 
     # Implement client patch
     class Client
-      READ_ONLY_ERRORS = %w[--read-only --super-read-only].freeze
-      AURORA_CONNECTION_ERRORS = [
-        'client is not connected',
-        'Lost connection to MySQL server',
-        "Can't connect to MySQL",
-        'Server shutdown in progress'
-      ].freeze
+      READ_ONLY_ERROR = '--read-only'
 
       attr_reader :client
 
       # Initialize class
       # @note [Override] with reconnect options
       # @param [Hash] opts Options
-      # @option opts [Integer] aurora_max_retry Max retry count, when failover. (Default: 5)
-      # @option opts [Bool] aurora_disconnect_on_readonly, when readonly exception hit terminate the connection (Default: false)
+      # @option opts [Bool] aurora_reconnect_on_readonly, when readonly exception hit terminate the connection (Default: false)
       def initialize(opts)
         @opts = Mysql2::Util.key_hash_as_symbols(opts)
-        @max_retry = (@opts.delete(:aurora_max_retry) || 0).to_i
-        @disconnect_on_readonly = @opts.delete(:aurora_disconnect_on_readonly) || false
+        @reconnect_on_readonly = @opts.delete(:aurora_reconnect_on_readonly) || false
         reconnect!
       end
 
       # Execute query with reconnect
       # @note [Override] with reconnect.
+      # Reconnect and raise exception if read_only error
       def query(*args)
-        try_count = 0
-
-        begin
-          client.query(*args)
-        rescue Mysql2::Error => e
-
-          # Disconnect and raise exception if read_only error
-          if read_only_error?(e.message) && @disconnect_on_readonly
-            warn '[mysql2-aurora] Database connection error, Aurora failover event likely occured'
-            disconnect!
-            raise e
-          end
-
-          # Reconnect if connection error
-          if aurora_connection_error?(e.message) && (try_count <= @max_retry)
-            try_count += 1
-            retry_interval_seconds = [1.5 * (try_count - 1), 10].min
-
-            warn "[mysql2-aurora] Database is readonly. Retry after #{retry_interval_seconds}seconds"
-            sleep retry_interval_seconds
-            reconnect!
-            retry
-          end
-
-          raise e
+        client.query(*args)
+      rescue Mysql2::Error => e
+        if read_only_error?(e.message) && @reconnect_on_readonly
+          warn '[mysql2-aurora] Database read-only error, Aurora failover event likely occured'
+          reconnect!
         end
+
+        raise e
       end
 
       # Reconnect to database and Set `@client`
@@ -86,18 +61,7 @@ module Mysql2
       # @param [String] message Exception message
       # @return [Boolean]
       def read_only_error?(message)
-        return false if message.nil?
-
-        READ_ONLY_ERRORS.any? { |matching_str| message.include?(matching_str) }
-      end
-
-      # Check if exception message contains connection errors
-      # @param [String] message Exception message
-      # @return [Boolean]
-      def aurora_connection_error?(message)
-        return false if message.nil?
-
-        AURORA_CONNECTION_ERRORS.any? { |matching_str| message.include?(matching_str) }
+        message&.include?(READ_ONLY_ERROR) || false
       end
 
       # Delegate method call to client.
